@@ -14,8 +14,267 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
+      - name: Create project files
+        run: |
+          cat > settings.gradle.kts <<'EOF_FILE'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "RuTube"
+          include(":app")
+          EOF_FILE
+          cat > build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_FILE
+          cat > gradle.properties <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          EOF_FILE
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.example.rutube"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.rutube"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF_FILE
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application
+                  android:label="RuTube"
+                  android:icon="@android:drawable/ic_media_play"
+                  android:usesCleartextTraffic="false"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
+                      android:hardwareAccelerated="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_FILE
+          mkdir -p app/src/main/java/com/example/rutube
+          cat > app/src/main/java/com/example/rutube/MainActivity.kt <<'EOF_FILE'
+          package com.example.rutube
+
+          import android.annotation.SuppressLint
+          import android.app.Activity
+          import android.graphics.Color
+          import android.os.Bundle
+          import android.speech.tts.TextToSpeech
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.webkit.JavascriptInterface
+          import android.webkit.WebChromeClient
+          import android.webkit.WebSettings
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import android.widget.Button
+          import android.widget.FrameLayout
+          import android.widget.Toast
+          import java.util.Locale
+
+          class MainActivity : Activity() {
+
+              private lateinit var web: WebView
+              private lateinit var root: FrameLayout
+              private lateinit var btn: Button
+              private var tts: TextToSpeech? = null
+              private var ttsReady = false
+              private var customView: View? = null
+              private var customCallback: WebChromeClient.CustomViewCallback? = null
+
+              inner class Bridge {
+                  @JavascriptInterface
+                  fun speak(text: String) {
+                      if (ttsReady) tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "ru")
+                  }
+                  @JavascriptInterface
+                  fun stop() { tts?.stop() }
+                  @JavascriptInterface
+                  fun toast(msg: String) {
+                      runOnUiThread { Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show() }
+                  }
+                  @JavascriptInterface
+                  fun state(on: Boolean) {
+                      runOnUiThread { btn.text = if (on) "Перевод: ВКЛ" else "Перевод" }
+                  }
+              }
+
+              @SuppressLint("SetJavaScriptEnabled")
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  tts = TextToSpeech(this) { status ->
+                      if (status == TextToSpeech.SUCCESS) {
+                          val r = tts?.setLanguage(Locale("ru", "RU"))
+                          ttsReady = r != TextToSpeech.LANG_MISSING_DATA && r != TextToSpeech.LANG_NOT_SUPPORTED
+                          if (!ttsReady) Toast.makeText(this,
+                              "Установите русский голос в настройках синтеза речи", Toast.LENGTH_LONG).show()
+                      }
+                  }
+
+                  root = FrameLayout(this)
+                  web = WebView(this)
+                  root.addView(web, FrameLayout.LayoutParams(-1, -1))
+
+                  btn = Button(this).apply {
+                      text = "Перевод"
+                      setTextColor(Color.WHITE)
+                      setBackgroundColor(0xCCD32F2F.toInt())
+                      setOnClickListener { runTranslate() }
+                  }
+                  val lp = FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.END)
+                  lp.setMargins(0, 0, 32, 160)
+                  root.addView(btn, lp)
+                  setContentView(root)
+
+                  web.settings.apply {
+                      javaScriptEnabled = true
+                      domStorageEnabled = true
+                      mediaPlaybackRequiresUserGesture = false
+                      mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                  }
+                  web.addJavascriptInterface(Bridge(), "Android")
+                  web.webViewClient = WebViewClient()
+                  web.webChromeClient = object : WebChromeClient() {
+                      override fun onShowCustomView(view: View, cb: CustomViewCallback) {
+                          customView = view; customCallback = cb
+                          root.addView(view, ViewGroup.LayoutParams(-1, -1))
+                          web.visibility = View.GONE
+                          @Suppress("DEPRECATION")
+                          window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_FULLSCREEN or
+                              View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                      }
+                      override fun onHideCustomView() {
+                          customView?.let { root.removeView(it) }
+                          customView = null
+                          customCallback?.onCustomViewHidden()
+                          web.visibility = View.VISIBLE
+                          @Suppress("DEPRECATION")
+                          window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+                      }
+                  }
+                  web.loadUrl("https://m.youtube.com")
+              }
+
+              private fun runTranslate() {
+                  val js = assets.open("translate.js").bufferedReader().use { it.readText() }
+                  web.evaluateJavascript(js, null)
+              }
+
+              @Deprecated("Deprecated in Java")
+              override fun onBackPressed() {
+                  when {
+                      customView != null -> web.webChromeClient?.onHideCustomView()
+                      web.canGoBack() -> web.goBack()
+                      else -> super.onBackPressed()
+                  }
+              }
+
+              override fun onDestroy() {
+                  tts?.shutdown()
+                  web.destroy()
+                  super.onDestroy()
+              }
+          }
+          EOF_FILE
+          mkdir -p app/src/main/assets
+          cat > app/src/main/assets/translate.js <<'EOF_FILE'
+          (async function () {
+            // выключение
+            if (window.__ruOn) {
+              window.__ruOn = false;
+              clearInterval(window.__ruTimer);
+              Android.stop();
+              var old = document.getElementById('__rusub');
+              if (old) old.remove();
+              var vv = document.querySelector('video');
+              if (vv) vv.volume = window.__ruVol || 1;
+              Android.state(false);
+              return;
+            }
+            var v = document.querySelector('video');
+            var id = new URL(location.href).searchParams.get('v');
+            if (!v || !id) { Android.toast('Сначала откройте видео'); return; }
+
+            try {
+              Android.toast('Загружаю перевод...');
+              var html = await (await fetch('/watch?v=' + id)).text();
+              var m = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});\s*(?:var|<\/script>)/);
+              if (!m) throw new Error('нет данных видео');
+              var pr = JSON.parse(m[1]);
+              var tracks = pr.captions && pr.captions.playerCaptionsTracklistRenderer &&
+                pr.captions.playerCaptionsTracklistRenderer.captionTracks;
+              if (!tracks || !tracks.length) throw new Error('у видео нет субтитров');
+              var tr = tracks.find(function (t) { return t.languageCode.indexOf('en') === 0; }) || tracks[0];
+              var url = tr.baseUrl + '&fmt=json3' + (tr.languageCode === 'ru' ? '' : '&tlang=ru');
+              var data = await (await fetch(url)).json();
+              var cues = [];
+              (data.events || []).forEach(function (e) {
+                if (!e.segs) return;
+                var t = e.segs.map(function (s) { return s.utf8; }).join('').replace(/\n/g, ' ').trim();
+                if (t) cues.push({ s: e.tStartMs / 1000, e: (e.tStartMs + (e.dDurationMs || 2000)) / 1000, t: t });
+              });
+              if (!cues.length) throw new Error('перевод пустой');
+
+              var box = document.createElement('div');
+              box.id = '__rusub';
+              box.style.cssText = 'position:fixed;left:5%;right:5%;bottom:90px;z-index:2147483647;' +
+                'text-align:center;color:#fff;font:600 16px sans-serif;background:rgba(0,0,0,.65);' +
+                'padding:6px 10px;border-radius:8px;pointer-events:none;display:none';
+              document.body.appendChild(box);
+
+              window.__ruVol = v.volume;
+              v.volume = 0.15;           // приглушаем оригинал
+              window.__ruOn = true;
+              var last = null;
+              window.__ruTimer = setInterval(function () {
+                var vid = document.querySelector('video');
+                if (!vid) return;
+                var t = vid.currentTime;
+                var cue = cues.find(function (c) { return t >= c.s && t <= c.e; });
+                if (cue !== last) {
+                  last = cue;
+                  if (cue) { box.textContent = cue.t; box.style.display = 'block'; if (!vid.paused) Android.speak(cue.t); }
+                  else { box.style.display = 'none'; }
+                }
+              }, 200);
+              Android.state(true);
+            } catch (err) {
+              Android.toast('Не удалось: ' + err.message);
+            }
+          })();
+          EOF_FILE
       - run: gradle assembleDebug
       - uses: actions/upload-artifact@v4
         with:
           name: RuTube-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+          
